@@ -14,7 +14,6 @@ import bisect
 import logging
 
 from .config import Config
-from .errors import StagePending
 from .models import Event, KeepSegment, Tag, Transcript, Word
 
 log = logging.getLogger(__name__)
@@ -106,10 +105,134 @@ class TimeMap:
         )
 
 
-def build_events(tags: list[Tag], time_map: TimeMap, cfg: Config, project) -> list[Event]:
-    """Превращает выровненные теги в события финального таймлайна.
+def build_events(
+    doc,
+    time_map: TimeMap,
+    cfg: Config,
+    project,
+    final_duration: float,
+) -> list[Event]:
+    """Превращает выровненные теги в события ФИНАЛЬНОГО таймлайна.
 
-    Здесь же решаются вопросы длительности: [ЭКРАН] без стоп-тега — до конца
-    абзаца, [ВСТАВКА] без длительности — cfg.insert.default_duration, и т.д.
+    Здесь решаются вопросы длительности ([ЭКРАН] без стоп-тега — до конца
+    абзаца, [ВСТАВКА] без числа — cfg.insert.default_duration) и ищутся файлы
+    ассетов. Пропавший файл или неразрешённый тег — предупреждение и пропуск,
+    а не остановка сборки.
     """
-    raise StagePending(STAGE, STAGE_TITLE, "сборка событий таймлайна ещё не реализована")
+    tags = sorted(
+        (tag for tag in doc.tags if tag.resolved),
+        key=lambda item: (item.word_index, item.paragraph),
+    )
+    events: list[Event] = []
+
+    for position, tag in enumerate(tags):
+        start = time_map.to_final(tag.src_time)
+
+        if tag.kind == "screen":
+            end = _screen_end(tag, tags[position + 1 :], doc, time_map, final_duration)
+            _append_media(events, "screen", tag, start, end, project, cfg, final_duration)
+
+        elif tag.kind == "insert":
+            duration = tag.duration or cfg.insert.default_duration
+            _append_media(
+                events, "insert", tag, start, start + duration, project, cfg, final_duration
+            )
+
+        elif tag.kind == "sound":
+            _append_media(events, "sound", tag, start, None, project, cfg, final_duration)
+
+        elif tag.kind == "music":
+            end = _music_end(tag, tags[position + 1 :], time_map, final_duration)
+            _append_media(events, "music", tag, start, end, project, cfg, final_duration)
+
+        elif tag.kind == "zoom":
+            duration = tag.duration or cfg.zoom.duration
+            events.append(
+                Event(
+                    kind="zoom",
+                    start=start,
+                    end=min(final_duration, start + duration),
+                    params={"tag": tag.raw},
+                )
+            )
+
+        elif tag.kind in ("pause", "screen_stop", "music_stop"):
+            # [ПАУЗА] отрабатывает раньше — в авторезе; стоп-теги закрывают
+            # интервалы соседних тегов и своих событий не порождают.
+            continue
+
+    events.sort(key=lambda item: item.start)
+    log.info(
+        "события таймлайна: %d (%s)",
+        len(events),
+        ", ".join(f"{event.kind}@{event.start:.1f}с" for event in events) or "нет",
+    )
+    return events
+
+
+def _append_media(
+    events: list[Event],
+    kind: str,
+    tag: Tag,
+    start: float,
+    end: float | None,
+    project,
+    cfg: Config,
+    final_duration: float,
+) -> None:
+    """Добавляет событие с файлом-ассетом, если файл нашёлся."""
+    source = project.find_asset(kind, tag.argument)
+    if source is None:
+        log.warning(
+            "%s: файл «%s» не найден — событие пропущено",
+            tag.raw,
+            tag.argument or "(не указан)",
+        )
+        return
+
+    start = max(0.0, min(start, final_duration))
+    if end is not None:
+        end = max(0.0, min(end, final_duration))
+        if end - start < 0.05:
+            log.warning(
+                "%s: интервал схлопнулся после вырезания пауз (%.2f-%.2f с) — пропускаю",
+                tag.raw,
+                start,
+                end,
+            )
+            return
+
+    events.append(Event(kind=kind, start=start, end=end, source=source, params={"tag": tag.raw}))
+
+
+def _screen_end(
+    tag: Tag,
+    following: list[Tag],
+    doc,
+    time_map: TimeMap,
+    final_duration: float,
+) -> float:
+    """Докуда показывать скринкаст: явная длительность, стоп-тег или конец абзаца."""
+    if tag.duration:
+        return time_map.to_final(tag.src_time) + tag.duration
+
+    for other in following:
+        if other.kind in ("screen_stop", "screen"):
+            return time_map.to_final(other.src_time)
+
+    if tag.paragraph < len(doc.paragraph_end_times):
+        paragraph_end = doc.paragraph_end_times[tag.paragraph]
+        if paragraph_end is not None:
+            return time_map.to_final(paragraph_end)
+
+    return final_duration
+
+
+def _music_end(
+    tag: Tag, following: list[Tag], time_map: TimeMap, final_duration: float
+) -> float:
+    """Музыка играет до [МУЗЫКА СТОП], до следующего [МУЗЫКА] или до конца ролика."""
+    for other in following:
+        if other.kind in ("music_stop", "music"):
+            return time_map.to_final(other.src_time)
+    return final_duration

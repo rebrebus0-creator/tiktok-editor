@@ -27,9 +27,8 @@ from pathlib import Path
 
 from . import __version__, ffmpeg_utils
 from .config import FONTS_DIR, PROJECTS_DIR, Config
-from .errors import EditorError, FFmpegNotFound, StagePending
+from .errors import EditorError, FFmpegNotFound
 from .logging_setup import collect_warnings, heading, setup_logging
-from .models import KeepSegment
 from .project import Project, discover_projects
 
 log = logging.getLogger("main")
@@ -38,16 +37,6 @@ OK = "OK "
 WARN = "!  "
 FAIL = "x  "
 
-STAGES: list[tuple[int, str]] = [
-    (1, "Транскрипция + авторез"),
-    (2, "Караоке-субтитры"),
-    (3, "Парсер + выравнивание"),
-    (4, "Композитинг"),
-    (5, "Финал: зум, нормализация, экспорт"),
-]
-
-# Этапы, которые уже собраны. Обновляется по мере готовности.
-DONE_STAGES: set[int] = {1}
 
 
 # --------------------------------------------------------------------------- #
@@ -248,26 +237,6 @@ def cmd_init(args: argparse.Namespace) -> int:
 TAG_RE = re.compile(r"\[([^\]\n]{1,120})\]")
 
 
-def _preview_tags(text: str, cfg: Config) -> tuple[dict[str, int], list[str]]:
-    """Грубый подсчёт тегов без выравнивания — чтобы глазами проверить разметку.
-
-    Полный разбор (аргументы, якоря, таймкоды) появится на этапе 3.
-    """
-    aliases = cfg.tags.alias_map()
-    counts: dict[str, int] = {}
-    unknown: list[str] = []
-    for match in TAG_RE.finditer(text):
-        body = match.group(1).strip()
-        head = body.split(":", 1)[0].strip().upper()
-        head = " ".join(head.split())
-        kind = aliases.get(head)
-        if kind is None:
-            unknown.append(match.group(0))
-        else:
-            counts[kind] = counts.get(kind, 0) + 1
-    return counts, unknown
-
-
 def cmd_info(args: argparse.Namespace) -> int:
     project = Project.load(Path(args.project))
     cfg = Config.load(project.path)
@@ -307,29 +276,38 @@ def cmd_info(args: argparse.Namespace) -> int:
         print(f"{FAIL}{exc}")
         return 1
 
-    words = len(re.sub(TAG_RE, " ", text).split())
+    from . import parser
+
+    # Разбираем тем же парсером, что и сборка: заодно видно, все ли файлы
+    # ассетов на месте — до того, как запускать долгое распознавание.
+    logging.getLogger("src.parser").setLevel(logging.ERROR)
+    doc = parser.parse_script(text, cfg)
+    logging.getLogger("src.parser").setLevel(logging.NOTSET)
+
+    words = len(doc.speech_words)
     # ~2.6 слова в секунду — типичный темп динамичной речи для коротких роликов.
     print(f"{OK}{project.script_path.name}: {words} слов (~{words / 2.6:.0f}с речи)")
 
-    counts, unknown = _preview_tags(text, cfg)
-    if counts:
-        titles = {
-            "screen": "[ЭКРАН]",
-            "screen_stop": "[ЭКРАН СТОП]",
-            "insert": "[ВСТАВКА]",
-            "sound": "[ЗВУК]",
-            "music": "[МУЗЫКА]",
-            "music_stop": "[МУЗЫКА СТОП]",
-            "pause": "[ПАУЗА]",
-            "zoom": "[ЗУМ]",
-        }
-        for kind, count in sorted(counts.items()):
-            print(f"{OK}{titles.get(kind, kind)}: {count}")
-    else:
+    if not doc.tags:
         print(f"{WARN}тегов не найдено — соберётся просто нарезка с субтитрами")
 
-    for raw_tag in unknown:
-        print(f"{WARN}неизвестный тег {raw_tag} — будет пропущен (имена тегов: config.tags.names)")
+    missing = 0
+    for tag in doc.tags:
+        note = ""
+        if tag.kind in ("screen", "insert", "sound", "music"):
+            if project.find_asset(tag.kind, tag.argument) is None:
+                note = "  <- ФАЙЛ НЕ НАЙДЕН"
+                missing += 1
+        duration = f", {tag.duration:g}с" if tag.duration else ""
+        mark = FAIL if note else OK
+        print(f"{mark}{tag.raw}{duration}{note}")
+
+    known_tags = {match.group(0) for match in TAG_RE.finditer(text)}
+    for raw_tag in sorted(known_tags - {tag.raw for tag in doc.tags}):
+        print(f"{WARN}неизвестный тег {raw_tag} — будет пропущен (имена: config.tags.names)")
+
+    if missing:
+        print(f"{WARN}не найдено файлов: {missing} — эти теги при сборке пропустятся")
 
     heading("Настройки")
     print(f"   формат: {cfg.video.resolution} @ {cfg.video.fps}fps")
@@ -359,14 +337,13 @@ def _apply_overrides(cfg: Config, args: argparse.Namespace) -> None:
         log.info("минимальная пауза переопределена: %s с", cfg.autocut.min_silence)
 
 
-def run_autocut(project: Project, cfg: Config, args: argparse.Namespace) -> dict:
-    """Этап 1 целиком: звук -> транскрипт -> нарезка -> видео без пауз.
+def prepare_source(project: Project, cfg: Config, args: argparse.Namespace) -> dict:
+    """Общее начало любой сборки: исходник -> звук -> транскрипт.
 
-    Возвращает отчёт: по нему настраиваются пороги, не пересматривая ролик
-    покадрово. Используется и командой `cut`, и сборкой `build`.
+    Вынесено отдельно, потому что теги [ПАУЗА] находятся уже по транскрипту,
+    а влияют на нарезку — значит, распознать нужно ДО автореза.
     """
-    from . import autocut, transcribe
-    from .timeline import TimeMap
+    from . import transcribe
 
     project.cache_dir.mkdir(parents=True, exist_ok=True)
     project.output_dir.mkdir(parents=True, exist_ok=True)
@@ -403,14 +380,46 @@ def run_autocut(project: Project, cfg: Config, args: argparse.Namespace) -> dict
         force=getattr(args, "no_cache", False),
         audio_path=audio,
     )
+    return {
+        "raw": raw,
+        "info": info,
+        "audio": audio,
+        "levels": levels,
+        "transcript": transcript,
+    }
+
+
+def run_autocut(
+    project: Project,
+    cfg: Config,
+    args: argparse.Namespace,
+    prepared: dict,
+    *,
+    protected: list[float] | None = None,
+    out_path: Path | None = None,
+) -> dict:
+    """Авторез: находит паузы, режет и склеивает видео без них.
+
+    protected — таймкоды тегов [ПАУЗА]: эта тишина не вырезается.
+    Возвращает отчёт и рабочие объекты (куски, карту времени), чтобы сборка
+    не пересчитывала то же самое.
+    """
+    from . import autocut
+    from .timeline import TimeMap
+
+    raw = prepared["raw"]
+    info = prepared["info"]
+    audio = prepared["audio"]
+    levels = prepared["levels"]
+    transcript = prepared["transcript"]
 
     heading("Авторез пауз")
     total = info.duration or transcript.duration
     silences = autocut.detect_silence(audio, cfg, total_duration=total)
-    segments = autocut.plan_keep_segments(silences, total, cfg)
+    segments = autocut.plan_keep_segments(silences, total, cfg, protected=protected)
     time_map = TimeMap(segments)
 
-    out_path = project.output_dir / f"{project.name}_cut.mp4"
+    out_path = out_path or project.output_dir / f"{project.name}_cut.mp4"
     autocut.render_cut(raw, segments, out_path, cfg)
     log.info("видео без пауз: %s (%.1f с)", out_path, time_map.total or total)
 
@@ -459,7 +468,14 @@ def run_autocut(project: Project, cfg: Config, args: argparse.Namespace) -> dict
         report["calibration"] = autocut.calibrate(audio, cfg, total)
         _print_calibration(report["calibration"], cfg)
 
-    return report
+    return {
+        "report": report,
+        "transcript": transcript,
+        "segments": segments,
+        "time_map": time_map,
+        "cut": out_path,
+        "duration": total,
+    }
 
 
 def _speech_check(transcript, segments, time_map) -> dict:
@@ -547,6 +563,25 @@ def _print_cut_summary(project: Project, report: dict) -> None:
     print(f"  лог:             {project.log_path}")
 
 
+def read_script(project: Project, cfg: Config, transcript):
+    """Разбирает сценарий и привязывает теги к речи.
+
+    Сценарий может отсутствовать или не подходить к записи — тогда работаем
+    без тегов, а не отказываемся собирать.
+    """
+    from . import aligner, parser
+
+    try:
+        doc = parser.parse_script(project.script_text(), cfg)
+    except EditorError as exc:
+        log.warning("сценарий не прочитан (%s) — собираю без тегов", exc)
+        return parser.ScriptDoc()
+
+    heading("Сценарий и выравнивание")
+    aligner.align(doc, transcript, cfg)
+    return doc
+
+
 def cmd_cut(args: argparse.Namespace) -> int:
     project = Project.load(Path(args.project))
     if not args.no_log_file:
@@ -558,7 +593,14 @@ def cmd_cut(args: argparse.Namespace) -> int:
 
     heading(f"Этап 1: {project.name}")
     with collect_warnings() as warnings:
-        report = run_autocut(project, cfg, args)
+        prepared = prepare_source(project, cfg, args)
+        doc = read_script(project, cfg, prepared["transcript"])
+        protected = [tag.src_time for tag in doc.tags if tag.kind == "pause" and tag.resolved]
+        if protected:
+            log.info("тегов [ПАУЗА]: %d — эта тишина останется", len(protected))
+        result = run_autocut(project, cfg, args, prepared, protected=protected)
+        report = result["report"]
+        report["protected_pauses"] = [round(value, 2) for value in protected]
         report["warnings"] = list(warnings)
 
     report_path = project.output_dir / "autocut-report.json"
@@ -566,6 +608,41 @@ def cmd_cut(args: argparse.Namespace) -> int:
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     _print_cut_summary(project, report)
+    return 0
+
+
+def cmd_subs(args: argparse.Namespace) -> int:
+    """Быстрая примерка субтитров: нарезка + субтитры, без оверлеев и зума."""
+    from . import compositor, subtitles
+
+    project = Project.load(Path(args.project))
+    if not args.no_log_file:
+        setup_logging(verbose=args.verbose, log_file=project.log_path)
+
+    cfg = Config.load(project.path)
+    ffmpeg_utils.require_ffmpeg()
+
+    heading(f"Примерка субтитров: {project.name}")
+    prepared = prepare_source(project, cfg, args)
+    doc = read_script(project, cfg, prepared["transcript"])
+    protected = [tag.src_time for tag in doc.tags if tag.kind == "pause" and tag.resolved]
+    result = run_autocut(
+        project, cfg, args, prepared, protected=protected,
+        out_path=project.cache_dir / "cut.mp4",
+    )
+
+    time_map = result["time_map"]
+    ass_path = subtitles.build_ass(
+        time_map.map_words(prepared["transcript"].words), project.cache_dir / "subs.ass", cfg
+    )
+    out_path = project.output_dir / f"{project.name}_subs.mp4"
+    compositor.burn_subtitles(result["cut"], ass_path, out_path, cfg)
+
+    heading("Готово")
+    print(f"  превью:   {out_path}")
+    print(f"  стиль:    {cfg.subtitles.font_name} {cfg.subtitles.font_size}pt, "
+          f"подсветка {cfg.subtitles.highlight_color}, до {cfg.subtitles.max_words} слов в плашке")
+    print(f"  править:  [subtitles] в config.toml, потом запустить эту команду снова")
     return 0
 
 
@@ -577,70 +654,135 @@ def cmd_cut(args: argparse.Namespace) -> int:
 def build_project(project: Project, args: argparse.Namespace) -> int:
     """Полный прогон пайплайна по одному проекту."""
     cfg = Config.load(project.path)
+    _apply_overrides(cfg, args)
     project.output_dir.mkdir(parents=True, exist_ok=True)
     project.cache_dir.mkdir(parents=True, exist_ok=True)
 
     heading(f"Сборка: {project.name}")
     ffmpeg_utils.require_ffmpeg()
-
     log.info("сценарий: %s", project.script_path)
     log.info("результат: %s", project.output_video())
-    raw = Path(args.raw).expanduser().resolve() if getattr(args, "raw", None) else project.raw_video()
 
-    try:
-        return _run_pipeline(project, cfg, raw, args)
-    except StagePending as pending:
-        log.warning("%s", pending)
-        _print_roadmap(pending.stage)
-        return 3
+    with collect_warnings() as warnings:
+        report = _run_pipeline(project, cfg, args)
+        report["warnings"] = list(warnings)
 
-
-def _run_pipeline(project: Project, cfg: Config, raw: Path, args: argparse.Namespace) -> int:
-    """Этапы пайплайна. По мере готовности каждый этап включается здесь."""
-    from . import aligner, compositor, parser, subtitles, timeline, transcribe
-    from .models import Transcript
-
-    # --- Этап 1: транскрипция + авторез -----------------------------------
-    heading("Этап 1: транскрипция + авторез")
-    report = run_autocut(project, cfg, args)
-    cut_video = Path(report["output"])
-    transcript = Transcript.load(project.cache_dir / "transcript.json")
-    segments = [
-        KeepSegment(item["start"], item["end"], item["protected"]) for item in report["segments"]
-    ]
-    time_map = timeline.TimeMap(segments)
-
-    # --- Этап 3: сценарий -> события таймлайна ----------------------------
-    heading("Этап 3: сценарий и выравнивание")
-    doc = parser.parse_script(project.script_text(), cfg)
-    tags = aligner.align(doc, transcript, cfg)
-    events = timeline.build_events(tags, time_map, cfg, project)
-
-    # --- Этап 2: субтитры --------------------------------------------------
-    heading("Этап 2: субтитры")
-    ass_path = None
-    if cfg.subtitles.enabled:
-        final_words = time_map.map_words(transcript.words)
-        ass_path = subtitles.build_ass(final_words, project.cache_dir / "subs.ass", cfg)
-
-    # --- Этапы 4-5: композитинг и экспорт ---------------------------------
-    heading("Этапы 4-5: композитинг и экспорт")
-    out = compositor.compose(cut_video, events, project.output_video(), cfg, ass_path=ass_path)
-    log.info("готово: %s", out)
+    timeline_path = project.output_dir / "timeline.json"
+    timeline_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    _print_build_summary(project, report)
     return 0
 
 
-def _print_roadmap(current_stage: int) -> None:
+def _print_build_summary(project: Project, report: dict) -> None:
+    heading(f"Готово: {project.name}")
+    print(f"  ролик:        {report['output']}")
+    print(f"  формат:       {report['resolution']}, {report['duration']} с")
+    print(
+        f"  авторез:      вырезано {report['autocut']['removed_seconds']} с "
+        f"({report['autocut']['removed_percent']}%), склеек {report['autocut']['cuts']}"
+    )
+
+    resolved = [tag for tag in report["tags"] if tag["final_time"] is not None]
+    weak = [tag for tag in resolved if tag["similarity"] < 0.55]
+    print(f"  теги:         {len(resolved)} из {len(report['tags'])} привязаны к речи")
+    if weak:
+        print(f"                {len(weak)} встали приблизительно — проверь timeline.json")
+    for event in report["events"]:
+        source = f" {event['source']}" if event["source"] else ""
+        end = f"-{event['end']}" if event["end"] is not None else ""
+        print(f"     {event['kind']:<7} {event['start']}{end} с{source}")
+
+    if report["speech_check"]["words_lost"]:
+        print(f"  ПОТЕРЯНО СЛОВ: {report['speech_check']['words_lost']} — см. timeline.json")
+    if report["warnings"]:
+        print(f"  предупреждений: {len(report['warnings'])} (подробности в build.log)")
     print()
-    print("Собираем по шагам:")
-    for number, title in STAGES:
-        if number in DONE_STAGES:
-            mark = "ok"
-        elif number == current_stage:
-            mark = "->"
-        else:
-            mark = "  "
-        print(f"   {mark} этап {number}. {title}")
+    print(f"  таймлайн:     {project.output_dir / 'timeline.json'}")
+    print(f"  лог:          {project.log_path}")
+
+
+def _run_pipeline(project: Project, cfg: Config, args: argparse.Namespace) -> dict:
+    """Полный пайплайн одного ролика. Возвращает отчёт о сборке.
+
+    Порядок принципиален: теги привязываются к словам ДО автореза (иначе
+    [ПАУЗА] нечего защищать), а в финальный таймлайн переводятся ПОСЛЕ него
+    — через карту времени.
+    """
+    from . import compositor, subtitles, timeline
+
+    # 1. Исходник, звук, распознавание речи.
+    prepared = prepare_source(project, cfg, args)
+    transcript = prepared["transcript"]
+
+    # 2. Сценарий: теги привязываются к секундам ИСХОДНОГО видео.
+    doc = read_script(project, cfg, transcript)
+    protected = [tag.src_time for tag in doc.tags if tag.kind == "pause" and tag.resolved]
+    if protected:
+        log.info("тегов [ПАУЗА]: %d — эта тишина останется", len(protected))
+
+    # 3. Авторез: паузы вырезаны, таймкоды поехали.
+    # Промежуточное видео без пауз — в кэш: пользователю в output/ нужен
+    # только готовый ролик.
+    result = run_autocut(
+        project, cfg, args, prepared, protected=protected,
+        out_path=project.cache_dir / "cut.mp4",
+    )
+    time_map = result["time_map"]
+
+    # 4. Перевод тегов в финальный таймлайн и поиск файлов ассетов.
+    heading("События таймлайна")
+    events = timeline.build_events(doc, time_map, cfg, project, time_map.total)
+
+    # 5. Субтитры по финальным таймкодам слов.
+    ass_path = None
+    if cfg.subtitles.enabled:
+        heading("Субтитры")
+        ass_path = subtitles.build_ass(
+            time_map.map_words(transcript.words), project.cache_dir / "subs.ass", cfg
+        )
+
+    # 6. Композитинг и экспорт.
+    heading("Композитинг и экспорт")
+    out = compositor.compose(
+        result["cut"], events, project.output_video(), cfg, ass_path=ass_path
+    )
+    final = ffmpeg_utils.media_info(out)
+    log.info("готово: %s — %s", out, final.summary())
+
+    return {
+        "project": project.name,
+        "output": str(out),
+        "duration": round(final.duration, 2),
+        "resolution": f"{final.width}x{final.height}",
+        "autocut": result["report"]["result"],
+        "speech_check": result["report"]["speech_check"],
+        "tags": [
+            {
+                "tag": tag.raw,
+                "kind": tag.kind,
+                "argument": tag.argument,
+                "anchor": tag.anchor,
+                "src_time": round(tag.src_time, 2) if tag.resolved else None,
+                "final_time": round(time_map.to_final(tag.src_time), 2)
+                if tag.resolved
+                else None,
+                "similarity": round(tag.similarity, 2),
+            }
+            for tag in doc.tags
+        ],
+        "events": [
+            {
+                "kind": event.kind,
+                "start": round(event.start, 2),
+                "end": round(event.end, 2) if event.end is not None else None,
+                "source": event.source.name if event.source else None,
+                "tag": event.params.get("tag"),
+            }
+            for event in events
+        ],
+    }
 
 
 def cmd_build(args: argparse.Namespace) -> int:
@@ -733,6 +875,16 @@ def build_parser() -> argparse.ArgumentParser:
     cut.add_argument("--no-calibrate", action="store_true", help="без калибровочной таблицы")
     cut.add_argument("--no-log-file", action="store_true", help="не писать output/build.log")
     cut.set_defaults(func=cmd_cut)
+
+    subs = sub.add_parser(
+        "subs",
+        help="примерить субтитры: нарезка + субтитры, без оверлеев (быстро)",
+    )
+    subs.add_argument("project", help="папка проекта")
+    subs.add_argument("--raw", help="конкретный исходник вместо автопоиска в raw/")
+    subs.add_argument("--no-cache", action="store_true", help="распознать речь заново")
+    subs.add_argument("--no-log-file", action="store_true", help="не писать output/build.log")
+    subs.set_defaults(func=cmd_subs, no_calibrate=True)
 
     build = sub.add_parser("build", help="собрать ролик")
     build.add_argument("project", help="папка проекта")

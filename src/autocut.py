@@ -181,23 +181,40 @@ def _invert(silences: list[tuple[float, float]], total: float) -> list[tuple[flo
 def _protected_pause(
     timestamp: float, silences: list[tuple[float, float]], cfg: Config
 ) -> KeepSegment | None:
-    """Тишина под тегом [ПАУЗА]: оставляем, но не длиннее protected_pause_max."""
+    """Тишина под тегом [ПАУЗА]: оставляем, но не длиннее protected_pause_max.
+
+    Тег стоит рядом с фразой, а сама пауза может оказаться и чуть позже
+    (держим паузу после фразы), и чуть раньше (пауза была перед ней), поэтому
+    ищем ближайшую тишину в окне pause_search секунд.
+    """
     limit = cfg.autocut.protected_pause_max
-    for start, end in silences:
-        if start - 0.5 <= timestamp <= end + 0.5:
-            kept = KeepSegment(start=start, end=min(end, start + limit), protected=True)
-            log.info(
-                "[ПАУЗА] на %.2f с: оставляю тишину %.2f-%.2f с",
-                timestamp,
-                kept.start,
-                kept.end,
-            )
-            return kept
-    log.warning(
-        "[ПАУЗА] на %.2f с: тишины рядом нет — тег ни на что не влияет",
+    window = cfg.autocut.pause_search
+
+    def distance(interval: tuple[float, float]) -> float:
+        start, end = interval
+        if start <= timestamp <= end:
+            return 0.0
+        return start - timestamp if start > timestamp else timestamp - end
+
+    candidates = [item for item in silences if distance(item) <= window]
+    if not candidates:
+        log.warning(
+            "[ПАУЗА] на %.2f с: тишины ближе %.1f с нет — тег ни на что не влияет",
+            timestamp,
+            window,
+        )
+        return None
+
+    # Ближайшая; при равном расстоянии предпочитаем ту, что после фразы.
+    start, end = min(candidates, key=lambda item: (distance(item), item[0] < timestamp))
+    kept = KeepSegment(start=start, end=min(end, start + limit), protected=True)
+    log.info(
+        "[ПАУЗА] на %.2f с: оставляю тишину %.2f-%.2f с",
         timestamp,
+        kept.start,
+        kept.end,
     )
-    return None
+    return kept
 
 
 def _merge(segments: list[KeepSegment]) -> list[KeepSegment]:
