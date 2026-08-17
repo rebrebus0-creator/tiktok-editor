@@ -1,3 +1,8 @@
+# Node (hyperframes CLI ставится локально, в репозиторий не кладём)
+node_modules/
+package.json
+package-lock.json
+
 # Python
 __pycache__/
 *.py[cod]
