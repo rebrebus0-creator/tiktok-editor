@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+
+# OS
+.DS_Store
+._*
+
+# Кэш пайплайна (транскрипты, промежуточные рендеры)
+.cache/
+projects/*/.cache/
+
+# Медиа и результаты рендера в git не кладём
+projects/*/output/*
+projects/*/raw/*
+projects/*/screencasts/*
+projects/*/inserts/*
+projects/*/sounds/*
+projects/*/music/*
+!projects/*/output/.gitkeep
+!projects/*/raw/.gitkeep
+!projects/*/screencasts/.gitkeep
+!projects/*/inserts/.gitkeep
+!projects/*/sounds/.gitkeep
+!projects/*/music/.gitkeep
+
+# Локальные переопределения конфига
+config.toml
+projects/*/config.toml
+
+# Логи
+*.log
