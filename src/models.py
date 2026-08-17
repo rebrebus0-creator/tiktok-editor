@@ -57,6 +57,11 @@ class Transcript:
     duration: float = 0.0
     source: str = ""
     model: str = ""
+    # Приметы исходника и настроек распознавания: по ним проверяется,
+    # не устарел ли кэш (сменили видео или модель — считаем заново).
+    source_size: int = 0
+    source_mtime: float = 0.0
+    params: dict[str, Any] = field(default_factory=dict)
 
     @property
     def text(self) -> str:
@@ -86,6 +91,9 @@ class Transcript:
             duration=data.get("duration", 0.0),
             source=data.get("source", ""),
             model=data.get("model", ""),
+            source_size=data.get("source_size", 0),
+            source_mtime=data.get("source_mtime", 0.0),
+            params=data.get("params", {}),
         )
 
 

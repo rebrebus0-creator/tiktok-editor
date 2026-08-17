@@ -95,8 +95,18 @@ class AutocutCfg:
     pad_after: float = 0.20
     # Слишком короткие куски речи после нарезки склеиваем с соседями.
     min_segment: float = 0.30
+    # Максимальный разрыв, через который короткий огрызок приклеивается к соседу.
+    merge_gap: float = 0.40
     # Тишину, защищённую тегом [ПАУЗА], оставляем — но не длиннее этого.
     protected_pause_max: float = 2.5
+    # Пороги для калибровочной таблицы в отчёте (команда cut): показывает,
+    # сколько вырезалось бы при каждом значении — чтобы подобрать своё.
+    calibration_db: list[float] = field(
+        default_factory=lambda: [-24.0, -28.0, -32.0, -36.0, -40.0, -45.0]
+    )
+    calibration_min_silence: list[float] = field(
+        default_factory=lambda: [0.30, 0.45, 0.60, 0.90]
+    )
 
 
 @dataclass

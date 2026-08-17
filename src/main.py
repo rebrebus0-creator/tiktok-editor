@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import re
 import sys
@@ -25,7 +26,8 @@ from pathlib import Path
 from . import __version__, ffmpeg_utils
 from .config import FONTS_DIR, PROJECTS_DIR, Config
 from .errors import EditorError, FFmpegNotFound, StagePending
-from .logging_setup import heading, setup_logging
+from .logging_setup import collect_warnings, heading, setup_logging
+from .models import KeepSegment
 from .project import Project, discover_projects
 
 log = logging.getLogger("main")
@@ -41,6 +43,9 @@ STAGES: list[tuple[int, str]] = [
     (4, "Композитинг"),
     (5, "Финал: зум, нормализация, экспорт"),
 ]
+
+# Этапы, которые уже собраны. Обновляется по мере готовности.
+DONE_STAGES: set[int] = {1}
 
 
 # --------------------------------------------------------------------------- #
@@ -269,6 +274,231 @@ def cmd_info(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# cut — этап 1 отдельной командой: транскрипт + авторез + отчёт
+# --------------------------------------------------------------------------- #
+
+
+def _apply_overrides(cfg: Config, args: argparse.Namespace) -> None:
+    """Разовые переопределения порогов из командной строки (подбор настроек)."""
+    if getattr(args, "silence_db", None) is not None:
+        cfg.autocut.silence_db = float(args.silence_db)
+        log.info("порог тишины переопределён: %s dB", cfg.autocut.silence_db)
+    if getattr(args, "min_silence", None) is not None:
+        cfg.autocut.min_silence = float(args.min_silence)
+        log.info("минимальная пауза переопределена: %s с", cfg.autocut.min_silence)
+
+
+def run_autocut(project: Project, cfg: Config, args: argparse.Namespace) -> dict:
+    """Этап 1 целиком: звук -> транскрипт -> нарезка -> видео без пауз.
+
+    Возвращает отчёт: по нему настраиваются пороги, не пересматривая ролик
+    покадрово. Используется и командой `cut`, и сборкой `build`.
+    """
+    from . import autocut, transcribe
+    from .timeline import TimeMap
+
+    project.cache_dir.mkdir(parents=True, exist_ok=True)
+    project.output_dir.mkdir(parents=True, exist_ok=True)
+
+    raw = Path(args.raw).expanduser().resolve() if getattr(args, "raw", None) else project.raw_video()
+    info = ffmpeg_utils.media_info(raw)
+    log.info("исходник: %s — %s", raw.name, info.summary())
+    if not info.has_audio:
+        raise EditorError(f"в {raw.name} нет звуковой дорожки — распознавать нечего")
+
+    heading("Звук и транскрипция")
+    audio = ffmpeg_utils.extract_audio(
+        raw, project.cache_dir / "audio.wav", sample_rate=transcribe.WHISPER_SAMPLE_RATE
+    )
+    levels = ffmpeg_utils.volume_stats(audio)
+    log.info(
+        "громкость дорожки: средняя %s dB, пик %s dB",
+        levels["mean_volume_db"],
+        levels["max_volume_db"],
+    )
+    mean = levels["mean_volume_db"]
+    if mean is not None and cfg.autocut.silence_db > mean:
+        log.warning(
+            "порог тишины (%s dB) громче средней громкости речи (%.1f dB) — "
+            "авторез срежет саму речь; ставь порог примерно на 10-15 dB ниже средней",
+            cfg.autocut.silence_db,
+            mean,
+        )
+
+    transcript = transcribe.transcribe(
+        raw,
+        cfg,
+        cache_path=project.cache_dir / "transcript.json",
+        force=getattr(args, "no_cache", False),
+        audio_path=audio,
+    )
+
+    heading("Авторез пауз")
+    total = info.duration or transcript.duration
+    silences = autocut.detect_silence(audio, cfg, total_duration=total)
+    segments = autocut.plan_keep_segments(silences, total, cfg)
+    time_map = TimeMap(segments)
+
+    out_path = project.output_dir / f"{project.name}_cut.mp4"
+    autocut.render_cut(raw, segments, out_path, cfg)
+    log.info("видео без пауз: %s (%.1f с)", out_path, time_map.total or total)
+
+    report = {
+        "project": project.name,
+        "source": {
+            "file": raw.name,
+            "duration": round(info.duration, 2),
+            "resolution": f"{info.width}x{info.height}" if info.width else None,
+            "fps": round(info.fps, 3) if info.fps else None,
+            "audio_codec": info.audio_codec,
+            "sample_rate": info.sample_rate,
+        },
+        "audio_levels": levels,
+        "config": {
+            "silence_db": cfg.autocut.silence_db,
+            "min_silence": cfg.autocut.min_silence,
+            "pad_before": cfg.autocut.pad_before,
+            "pad_after": cfg.autocut.pad_after,
+            "min_segment": cfg.autocut.min_segment,
+            "merge_gap": cfg.autocut.merge_gap,
+        },
+        "transcribe": {
+            "model": transcript.model,
+            "language": transcript.language,
+            "words": len(transcript.words),
+            "segments": len(transcript.segments),
+            "avg_probability": round(
+                sum(word.probability for word in transcript.words) / len(transcript.words), 3
+            )
+            if transcript.words
+            else 0.0,
+        },
+        "result": autocut.stats(segments, silences, total),
+        "speech_check": _speech_check(transcript, segments, time_map),
+        "segments": [
+            {"start": round(s.start, 2), "end": round(s.end, 2), "protected": s.protected}
+            for s in segments
+        ],
+        "silences": [{"start": round(s, 2), "end": round(e, 2)} for s, e in silences],
+        "output": str(out_path),
+    }
+
+    if not getattr(args, "no_calibrate", False):
+        heading("Калибровка порогов")
+        report["calibration"] = autocut.calibrate(audio, cfg, total)
+        _print_calibration(report["calibration"], cfg)
+
+    return report
+
+
+def _speech_check(transcript, segments, time_map) -> dict:
+    """Главная проверка качества автореза: не порезало ли речь.
+
+    Слово считается потерянным, если его середина попала в вырезанный кусок,
+    и «на грани», если оно начинается или заканчивается вплотную к склейке.
+    """
+    edge = 0.06  # 60 мс — на слух это уже съеденный слог
+    lost: list[dict] = []
+    risky: list[dict] = []
+
+    for word in transcript.words:
+        middle = (word.start + word.end) / 2
+        if not time_map.covers(middle):
+            lost.append({"word": word.text, "start": round(word.start, 2)})
+            continue
+        for segment in segments:
+            if segment.start <= middle <= segment.end:
+                if word.start - segment.start < edge and segment.start > 0.01:
+                    risky.append(
+                        {"word": word.text, "start": round(word.start, 2), "where": "начало куска"}
+                    )
+                elif segment.end - word.end < edge:
+                    risky.append(
+                        {"word": word.text, "start": round(word.start, 2), "where": "конец куска"}
+                    )
+                break
+
+    return {
+        "words_total": len(transcript.words),
+        "words_lost": len(lost),
+        "words_at_edge": len(risky),
+        "lost_examples": lost[:20],
+        "edge_examples": risky[:20],
+    }
+
+
+def _print_calibration(calibration: dict, cfg: Config) -> None:
+    print()
+    print("  Порог тишины (min_silence = %.2f с):" % cfg.autocut.min_silence)
+    print("    порог dB   пауз   кусков   вырезано")
+    for row in calibration.get("silence_db", []):
+        current = " <- сейчас" if row["silence_db"] == cfg.autocut.silence_db else ""
+        print(
+            f"    {row['silence_db']:>8}   {row['silences']:>4}   {row['segments']:>6}"
+            f"   {row['removed_percent']:>5}%{current}"
+        )
+    print()
+    print("  Минимальная пауза (порог = %.1f dB):" % cfg.autocut.silence_db)
+    print("    длина с    пауз   кусков   вырезано")
+    for row in calibration.get("min_silence", []):
+        current = " <- сейчас" if row["min_silence"] == cfg.autocut.min_silence else ""
+        print(
+            f"    {row['min_silence']:>8}   {row['silences']:>4}   {row['segments']:>6}"
+            f"   {row['removed_percent']:>5}%{current}"
+        )
+
+
+def _print_cut_summary(project: Project, report: dict) -> None:
+    result = report["result"]
+    check = report["speech_check"]
+    heading("Итог этапа 1")
+    print(f"  исходник:        {report['source']['file']}, {result['total_seconds']} с")
+    print(
+        f"  после автореза:  {result['kept_seconds']} с "
+        f"(вырезано {result['removed_seconds']} с, {result['removed_percent']}%)"
+    )
+    print(f"  склеек:          {result['cuts']} (кусков речи: {result['segments']})")
+    print(
+        f"  распознано:      {report['transcribe']['words']} слов, "
+        f"уверенность {report['transcribe']['avg_probability']}"
+    )
+    if check["words_lost"]:
+        print(f"  ПОТЕРЯНО СЛОВ:   {check['words_lost']} — речь порезана, пороги надо править")
+        for item in check["lost_examples"][:5]:
+            print(f"       «{item['word']}» на {item['start']} с")
+    else:
+        print("  потеряно слов:   0")
+    print(f"  слов у склейки:  {check['words_at_edge']} (проверь на слух, не съеден ли слог)")
+    print()
+    print(f"  видео:           {report['output']}")
+    print(f"  отчёт:           {project.output_dir / 'autocut-report.json'}")
+    print(f"  транскрипт:      {project.cache_dir / 'transcript.json'}")
+    print(f"  лог:             {project.log_path}")
+
+
+def cmd_cut(args: argparse.Namespace) -> int:
+    project = Project.load(Path(args.project))
+    if not args.no_log_file:
+        setup_logging(verbose=args.verbose, log_file=project.log_path)
+
+    cfg = Config.load(project.path)
+    _apply_overrides(cfg, args)
+    ffmpeg_utils.require_ffmpeg()
+
+    heading(f"Этап 1: {project.name}")
+    with collect_warnings() as warnings:
+        report = run_autocut(project, cfg, args)
+        report["warnings"] = list(warnings)
+
+    report_path = project.output_dir / "autocut-report.json"
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    _print_cut_summary(project, report)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # build — сборка ролика
 # --------------------------------------------------------------------------- #
 
@@ -282,10 +512,9 @@ def build_project(project: Project, args: argparse.Namespace) -> int:
     heading(f"Сборка: {project.name}")
     ffmpeg_utils.require_ffmpeg()
 
-    raw = Path(args.raw).expanduser().resolve() if getattr(args, "raw", None) else project.raw_video()
-    log.info("исходник: %s", raw)
     log.info("сценарий: %s", project.script_path)
     log.info("результат: %s", project.output_video())
+    raw = Path(args.raw).expanduser().resolve() if getattr(args, "raw", None) else project.raw_video()
 
     try:
         return _run_pipeline(project, cfg, raw, args)
@@ -297,19 +526,17 @@ def build_project(project: Project, args: argparse.Namespace) -> int:
 
 def _run_pipeline(project: Project, cfg: Config, raw: Path, args: argparse.Namespace) -> int:
     """Этапы пайплайна. По мере готовности каждый этап включается здесь."""
-    from . import aligner, autocut, compositor, parser, subtitles, timeline, transcribe
+    from . import aligner, compositor, parser, subtitles, timeline, transcribe
+    from .models import Transcript
 
     # --- Этап 1: транскрипция + авторез -----------------------------------
     heading("Этап 1: транскрипция + авторез")
-    transcript = transcribe.transcribe(
-        raw,
-        cfg,
-        cache_path=project.cache_dir / "transcript.json",
-        force=args.no_cache,
-    )
-    silences = autocut.detect_silence(raw, cfg)
-    segments = autocut.plan_keep_segments(silences, transcript.duration, cfg)
-    cut_video = autocut.render_cut(raw, segments, project.cache_dir / "cut.mp4", cfg)
+    report = run_autocut(project, cfg, args)
+    cut_video = Path(report["output"])
+    transcript = Transcript.load(project.cache_dir / "transcript.json")
+    segments = [
+        KeepSegment(item["start"], item["end"], item["protected"]) for item in report["segments"]
+    ]
     time_map = timeline.TimeMap(segments)
 
     # --- Этап 3: сценарий -> события таймлайна ----------------------------
@@ -334,9 +561,14 @@ def _run_pipeline(project: Project, cfg: Config, raw: Path, args: argparse.Names
 
 def _print_roadmap(current_stage: int) -> None:
     print()
-    print("Каркас (этап 0) готов. Дальше собираем по шагам:")
+    print("Собираем по шагам:")
     for number, title in STAGES:
-        mark = "->" if number == current_stage else ("  " if number > current_stage else "ok")
+        if number in DONE_STAGES:
+            mark = "ok"
+        elif number == current_stage:
+            mark = "->"
+        else:
+            mark = "  "
         print(f"   {mark} этап {number}. {title}")
 
 
@@ -410,18 +642,45 @@ def build_parser() -> argparse.ArgumentParser:
     info.add_argument("project", help="папка проекта")
     info.set_defaults(func=cmd_info)
 
+    cut = sub.add_parser(
+        "cut",
+        help="этап 1: транскрипт + авторез пауз + диагностический отчёт",
+        description=(
+            "Распознаёт речь, вырезает паузы и складывает результат в output/:\n"
+            "  <проект>_cut.mp4      видео без пауз\n"
+            "  autocut-report.json   отчёт для подбора порогов\n"
+            "  build.log             полный лог прогона\n"
+            "Транскрипт кэшируется, поэтому повторный подбор порогов идёт быстро."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    cut.add_argument("project", help="папка проекта")
+    cut.add_argument("--raw", help="конкретный исходник вместо автопоиска в raw/")
+    cut.add_argument("--silence-db", type=float, help="порог тишины, dB (перебить конфиг)")
+    cut.add_argument("--min-silence", type=float, help="минимальная пауза, с (перебить конфиг)")
+    cut.add_argument("--no-cache", action="store_true", help="распознать речь заново")
+    cut.add_argument("--no-calibrate", action="store_true", help="без калибровочной таблицы")
+    cut.add_argument("--no-log-file", action="store_true", help="не писать output/build.log")
+    cut.set_defaults(func=cmd_cut)
+
     build = sub.add_parser("build", help="собрать ролик")
     build.add_argument("project", help="папка проекта")
     build.add_argument("--raw", help="конкретный исходник вместо автопоиска в raw/")
     build.add_argument("--no-cache", action="store_true", help="не использовать кэш транскрипта")
+    build.add_argument(
+        "--calibrate",
+        dest="no_calibrate",
+        action="store_false",
+        help="добавить калибровочную таблицу порогов (по умолчанию только в cut)",
+    )
     build.add_argument("--no-log-file", action="store_true", help="не писать output/build.log")
-    build.set_defaults(func=cmd_build)
+    build.set_defaults(func=cmd_build, no_calibrate=True)
 
     batch = sub.add_parser("batch", help="собрать все проекты внутри папки")
     batch.add_argument("directory", nargs="?", default=str(PROJECTS_DIR), help="папка с проектами")
     batch.add_argument("--no-cache", action="store_true", help="не использовать кэш транскрипта")
     batch.add_argument("--no-log-file", action="store_true", help="не писать output/build.log")
-    batch.set_defaults(func=cmd_batch, raw=None)
+    batch.set_defaults(func=cmd_batch, raw=None, no_calibrate=True)
 
     return parser
 

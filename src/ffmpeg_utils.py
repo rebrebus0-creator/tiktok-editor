@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -111,6 +112,56 @@ def available_encoders() -> frozenset[str]:
         if len(parts) >= 2 and parts[0].startswith(("V", "A", "S")) and len(parts[0]) == 6:
             names.add(parts[1])
     return frozenset(names)
+
+
+def extract_audio(src: Path, out_path: Path, *, sample_rate: int = 16000) -> Path:
+    """Достаёт из видео моно-WAV 16 кГц.
+
+    Одна дорожка используется и Whisper'ом, и детектом тишины: так таймкоды
+    слов и границы пауз считаются от одного и того же сигнала, и видео
+    не декодируется по второму разу.
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            "-i",
+            str(src),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(sample_rate),
+            "-c:a",
+            "pcm_s16le",
+            str(out_path),
+        ],
+        desc=f"извлечение звука из {src.name}",
+    )
+    return out_path
+
+
+_MEAN_VOLUME_RE = re.compile(r"mean_volume:\s*(-?[\d.]+) dB")
+_MAX_VOLUME_RE = re.compile(r"max_volume:\s*(-?[\d.]+) dB")
+
+
+def volume_stats(src: Path) -> dict[str, float | None]:
+    """Средняя и пиковая громкость дорожки (ffmpeg volumedetect).
+
+    Нужна, чтобы понять, адекватен ли порог тишины: если порог выше средней
+    громкости речи, авторез вырежет саму речь.
+    """
+    proc = run_raw(
+        ["-i", str(src), "-vn", "-af", "volumedetect", "-f", "null", "-"],
+        desc=f"замер громкости {src.name}",
+        loglevel="info",
+    )
+    text = proc.stderr or ""
+    mean = _MEAN_VOLUME_RE.search(text)
+    peak = _MAX_VOLUME_RE.search(text)
+    return {
+        "mean_volume_db": float(mean.group(1)) if mean else None,
+        "max_volume_db": float(peak.group(1)) if peak else None,
+    }
 
 
 def run(

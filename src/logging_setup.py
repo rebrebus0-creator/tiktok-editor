@@ -9,7 +9,9 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 _LEVEL_COLORS = {
     logging.DEBUG: "\033[90m",  # серый
@@ -78,6 +80,29 @@ def setup_logging(verbose: bool = False, log_file: Path | None = None) -> None:
     # faster-whisper и av любят сыпать в лог на INFO — приглушаем.
     logging.getLogger("faster_whisper").setLevel(logging.WARNING)
     logging.getLogger("libav").setLevel(logging.ERROR)
+
+
+class _WarningCollector(logging.Handler):
+    """Складывает предупреждения в список — они попадают в отчёт сборки."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(f"{record.levelname.lower()}: {record.getMessage()}")
+
+
+@contextmanager
+def collect_warnings() -> Iterator[list[str]]:
+    """Собирает все предупреждения прогона, чтобы приложить их к отчёту."""
+    handler = _WarningCollector()
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        yield handler.messages
+    finally:
+        root.removeHandler(handler)
 
 
 def heading(title: str) -> None:
