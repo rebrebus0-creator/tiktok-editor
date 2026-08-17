@@ -32,5 +32,9 @@ projects/*/music/*
 config.toml
 projects/*/config.toml
 
+# Тестовая площадка для отладки пайплайна: личное видео и рабочий сценарий,
+# которым не место в репозитории (projects/example/ остаётся как документация).
+projects/test/
+
 # Логи
 *.log
