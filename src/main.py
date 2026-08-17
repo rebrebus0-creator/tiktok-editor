@@ -17,10 +17,12 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import logging
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 from . import __version__, ffmpeg_utils
@@ -53,6 +55,53 @@ DONE_STAGES: set[int] = {1}
 # --------------------------------------------------------------------------- #
 
 
+def _smoke_test_cut(cfg: Config) -> str | None:
+    """Прогоняет настоящую нарезку на секундном тестовом ролике.
+
+    Возвращает описание проблемы или None, если всё сошлось.
+    """
+    from . import autocut
+    from .models import KeepSegment
+
+    fast = copy.deepcopy(cfg)
+    fast.video.preset = "ultrafast"
+    fast.video.crf = 32
+
+    autocut_log = logging.getLogger("src.autocut")
+    previous_level = autocut_log.level
+    autocut_log.setLevel(logging.WARNING)
+    try:
+        with tempfile.TemporaryDirectory(prefix="tiktok-editor-check-") as tmp:
+            source = Path(tmp) / "probe.mp4"
+            ffmpeg_utils.run(
+                [
+                    "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=2",
+                    "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-shortest", str(source),
+                ],
+                desc="тестовый ролик",
+            )
+            out = Path(tmp) / "cut.mp4"
+            # Два куска по 0.5 с: в сумме ровно 1 с — по длительности и сверяем.
+            autocut.render_cut(
+                source,
+                [KeepSegment(0.0, 0.5), KeepSegment(1.0, 1.5)],
+                out,
+                fast,
+            )
+            result = ffmpeg_utils.media_info(out)
+            if abs(result.duration - 1.0) > 0.25:
+                return f"длительность результата {result.duration:.2f} с вместо 1.00 с"
+            if not result.has_audio:
+                return "в результате пропала звуковая дорожка"
+    except EditorError as exc:
+        return str(exc).replace("\n", " ")[:300]
+    finally:
+        autocut_log.setLevel(previous_level)
+    return None
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     cfg = Config.load()
     problems = 0
@@ -80,22 +129,44 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     if ffmpeg_path:
         heading("Фильтры FFmpeg")
-        missing = [name for name in ffmpeg_utils.REQUIRED_FILTERS if not ffmpeg_utils.has_filter(name)]
-        if missing:
-            for name in missing:
-                print(f"{FAIL}фильтр {name} отсутствует в этой сборке FFmpeg")
-            problems += len(missing)
-            print("   Поставь полную сборку: brew install ffmpeg")
-        else:
-            print(f"{OK}все нужные фильтры на месте ({len(ffmpeg_utils.REQUIRED_FILTERS)} шт.)")
-
+        filters = ffmpeg_utils.available_filters()
         encoders = ffmpeg_utils.available_encoders()
-        for encoder in (cfg.video.video_codec, cfg.video.audio_codec):
-            if encoder in encoders:
-                print(f"{OK}кодек {encoder}")
+        # Если разбор списка сломался на будущей версии FFmpeg — честно
+        # говорим об этом, а не рапортуем, что отсутствуют все фильтры сразу.
+        if len(filters) < 20:
+            print(f"{WARN}не удалось прочитать список фильтров этой сборки — пропускаю проверку")
+            warnings += 1
+        else:
+            missing = [name for name in ffmpeg_utils.REQUIRED_FILTERS if name not in filters]
+            if missing:
+                for name in missing:
+                    print(f"{FAIL}фильтр {name} отсутствует в этой сборке FFmpeg")
+                problems += len(missing)
+                print("   Поставь полную сборку: brew install ffmpeg")
             else:
-                print(f"{FAIL}кодек {encoder} недоступен")
-                problems += 1
+                print(f"{OK}все нужные фильтры на месте ({len(ffmpeg_utils.REQUIRED_FILTERS)} шт.)")
+
+        if len(encoders) < 10:
+            print(f"{WARN}не удалось прочитать список кодеков этой сборки — пропускаю проверку")
+            warnings += 1
+        else:
+            for encoder in (cfg.video.video_codec, cfg.video.audio_codec):
+                if encoder in encoders:
+                    print(f"{OK}кодек {encoder}")
+                else:
+                    print(f"{FAIL}кодек {encoder} недоступен")
+                    problems += 1
+
+    if ffmpeg_path:
+        heading("Проверка склейки")
+        # Самая версиезависимая операция проекта — режем и склеиваем тестовый
+        # ролик тем же кодом, что и настоящий. Дешевле, чем узнать на материале.
+        problem = _smoke_test_cut(cfg)
+        if problem:
+            print(f"{FAIL}нарезка не работает на этой сборке FFmpeg: {problem}")
+            problems += 1
+        else:
+            print(f"{OK}нарезка и склейка работают (FFmpeg {ffmpeg_utils.major_version()}.x)")
 
     heading("Python-зависимости")
     try:

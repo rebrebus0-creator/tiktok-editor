@@ -18,6 +18,26 @@ from pathlib import Path
 
 from .errors import FFmpegError, FFmpegNotFound
 
+__all__ = [
+    "REQUIRED_FILTERS",
+    "MediaInfo",
+    "available_encoders",
+    "available_filters",
+    "duration",
+    "extract_audio",
+    "find_ffmpeg",
+    "has_filter",
+    "major_version",
+    "media_info",
+    "probe",
+    "require_ffmpeg",
+    "run",
+    "run_filter_complex",
+    "run_raw",
+    "version",
+    "volume_stats",
+]
+
 log = logging.getLogger(__name__)
 
 # Фильтры, без которых пайплайн не соберётся (проверяются командой `check`).
@@ -70,6 +90,73 @@ def version(binary: str | None = None) -> str:
     first = out.splitlines()[0] if out else ""
     parts = first.split()
     return parts[2] if len(parts) > 2 else first
+
+
+@lru_cache(maxsize=1)
+def major_version() -> int:
+    """Мажорная версия FFmpeg (0 — не удалось определить, например git-сборка).
+
+    Версии расходятся в мелочах командной строки: в 7.0 `-filter_complex_script`
+    объявлен устаревшим в пользу `-/filter_complex`, а в 9.0 его уже нет.
+    """
+    try:
+        raw = version()
+    except FFmpegNotFound:
+        return 0
+    head = raw.split(".")[0].split("-")[0]
+    return int(head) if head.isdigit() else 0
+
+
+# Фильтрограф длиннее этого отдаём файлом, а не аргументом командной строки.
+# Реальные ролики дают 5-50 КБ, так что путь через файл — страховка на будущее.
+MAX_INLINE_FILTER_CHARS = 120_000
+
+
+def run_filter_complex(
+    graph: str,
+    *,
+    input_args: list[str],
+    output_args: list[str],
+    desc: str,
+    script_dir: Path | None = None,
+) -> subprocess.CompletedProcess:
+    """Запускает ffmpeg с фильтрографом, совместимо со всеми версиями FFmpeg.
+
+    По умолчанию граф передаётся прямо в `-filter_complex`: это понимают все
+    версии. Очень длинный граф уходит файлом, и вот там способ передачи
+    зависит от версии — `-/filter_complex` (FFmpeg 7+) или устаревший
+    `-filter_complex_script` (до 9.0). Если угадали неверно, пробуем второй.
+    """
+    if len(graph) <= MAX_INLINE_FILTER_CHARS:
+        return run(
+            [*input_args, "-filter_complex", graph, *output_args],
+            desc=desc,
+        )
+
+    directory = script_dir or Path(".")
+    directory.mkdir(parents=True, exist_ok=True)
+    script_path = directory / ".filter_graph.txt"
+    script_path.write_text(graph, encoding="utf-8")
+    log.debug("фильтрограф длиной %d символов передаю файлом %s", len(graph), script_path)
+
+    # Современный синтаксис первым, старый — запасным.
+    variants = [["-/filter_complex", str(script_path)], ["-filter_complex_script", str(script_path)]]
+    if major_version() and major_version() < 7:
+        variants.reverse()
+
+    try:
+        last_error: FFmpegError | None = None
+        for variant in variants:
+            try:
+                return run([*input_args, *variant, *output_args], desc=desc)
+            except FFmpegError as exc:
+                if "Unrecognized option" not in str(exc):
+                    raise
+                log.debug("вариант %s не поддерживается этой сборкой FFmpeg", variant[0])
+                last_error = exc
+        raise last_error or FFmpegError(f"{desc}: не удалось передать фильтрограф")
+    finally:
+        script_path.unlink(missing_ok=True)
 
 
 @lru_cache(maxsize=1)

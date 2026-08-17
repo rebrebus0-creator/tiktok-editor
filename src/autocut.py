@@ -272,31 +272,13 @@ def render_cut(video: Path, segments: list[KeepSegment], out_path: Path, cfg: Co
         )
         return out_path
 
-    parts: list[str] = []
-    labels: list[str] = []
-    for index, segment in enumerate(segments):
-        parts.append(
-            f"[0:v]trim=start={segment.start:.3f}:end={segment.end:.3f},"
-            f"setpts=PTS-STARTPTS[v{index}];"
-        )
-        parts.append(
-            f"[0:a]atrim=start={segment.start:.3f}:end={segment.end:.3f},"
-            f"asetpts=PTS-STARTPTS[a{index}];"
-        )
-        labels.append(f"[v{index}][a{index}]")
-    parts.append(f"{''.join(labels)}concat=n={len(segments)}:v=1:a=1[vout][aout]")
-
-    # Длинный фильтрограф не влезает в аргументы командной строки — отдаём файлом.
-    script_path = out_path.parent / f".{out_path.stem}_filter.txt"
-    script_path.write_text("\n".join(parts), encoding="utf-8")
+    graph = build_concat_graph(segments)
 
     log.info("склейка %d кусков -> %s", len(segments), out_path.name)
-    ffmpeg_utils.run(
-        [
-            "-i",
-            str(video),
-            "-filter_complex_script",
-            str(script_path),
+    ffmpeg_utils.run_filter_complex(
+        graph,
+        input_args=["-i", str(video)],
+        output_args=[
             "-map",
             "[vout]",
             "-map",
@@ -320,9 +302,27 @@ def render_cut(video: Path, segments: list[KeepSegment], out_path: Path, cfg: Co
             str(out_path),
         ],
         desc="нарезка и склейка",
+        script_dir=out_path.parent,
     )
-    script_path.unlink(missing_ok=True)
     return out_path
+
+
+def build_concat_graph(segments: list[KeepSegment]) -> str:
+    """Фильтрограф «вырезать куски и склеить» для trim/atrim + concat."""
+    parts: list[str] = []
+    labels: list[str] = []
+    for index, segment in enumerate(segments):
+        parts.append(
+            f"[0:v]trim=start={segment.start:.3f}:end={segment.end:.3f},"
+            f"setpts=PTS-STARTPTS[v{index}]"
+        )
+        parts.append(
+            f"[0:a]atrim=start={segment.start:.3f}:end={segment.end:.3f},"
+            f"asetpts=PTS-STARTPTS[a{index}]"
+        )
+        labels.append(f"[v{index}][a{index}]")
+    parts.append(f"{''.join(labels)}concat=n={len(segments)}:v=1:a=1[vout][aout]")
+    return ";".join(parts)
 
 
 def calibrate(
