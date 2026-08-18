@@ -3,6 +3,13 @@ node_modules/
 package.json
 package-lock.json
 
+# Рабочая папка задачи монтажа: правила бренда, сырьё, клоны моделей, кадры.
+# Это временные материалы конкретного ролика, не код проекта.
+work/
+
+# Личные разрешения сессии
+.claude/settings.local.json
+
 # Python
 __pycache__/
 *.py[cod]
