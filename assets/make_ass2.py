@@ -29,8 +29,8 @@ def norm(w):
     return re.sub(r"[^\w-]", "", w, flags=re.UNICODE).upper()
 
 def strip_punct(w):
-    # remove commas, periods, dashes, ellipsis, quotes, ! ? etc. keep letters/digits and inner hyphen
-    return re.sub(r"[.,!?…«»\"'—–-]", "", w).strip()
+    # remove commas, periods, ellipsis, quotes, ! ? — keep letters/digits and inner hyphen
+    return re.sub(r"[.,!?…«»\"'—–]", "", w).strip()
 
 def ass_time(t):
     h = int(t // 3600); t -= h*3600
@@ -56,12 +56,14 @@ WHITE = "&H00FFFFFF&"
 RED   = "&H000000FF&"   # BBGGRR -> pure red
 
 events = []
-click_times = []
+sfx = []          # list of (time, type) type in {click, pop}
+sfx_toggle = 0    # alternate click/pop across hook words
+
+def is_youtube(w):
+    return "YOUTUBE" in norm(w)
 
 for (start, end, text) in CUES:
     is_hook = start < HOOK_END
-    if is_hook:
-        continue  # hook subtitles removed — user edits the first seconds himself
     words = [strip_punct(x) for x in text.split()]
     words = [x for x in words if x]
     weights = [max(len(w), 2) for w in words]
@@ -74,16 +76,27 @@ for (start, end, text) in CUES:
         t = we
         disp = w.upper().replace("\\", "").replace("{", "(").replace("}", ")")
         style = "Hook" if is_hook else "Sub"
-        red = is_hook and norm(w) in RED_WORDS
-        main_col = RED if red else WHITE
-        if red:
-            click_times.append(round(ws, 2))
-        # glow layer (blurred white halo) - layer 0
-        glow_blur = 7 if is_hook else 5
-        glow = (f"Dialogue: 0,{ass_time(ws)},{ass_time(we)},{style},,0,0,0,,"
-                f"{{\\blur{glow_blur}\\bord0\\shad0\\1c{WHITE}\\alpha&H35&}}{disp}")
-        # main layer - layer 1. Hook: camera pull-back (125%->100%)
+        yt = is_hook and is_youtube(w)          # YouTube -> red, semi-transparent, pop
+        main_col = RED if yt else WHITE
+
+        # alternating SFX on hook words: click, pop, click, pop ...
         if is_hook:
+            typ = "click" if sfx_toggle % 2 == 0 else "pop"
+            sfx.append((round(ws, 2), typ))
+            sfx_toggle += 1
+
+        # glow layer (blurred halo) - layer 0
+        glow_blur = 7 if is_hook else 5
+        glow_col = RED if yt else WHITE
+        glow_alpha = "&H55&" if yt else "&H35&"
+        glow = (f"Dialogue: 0,{ass_time(ws)},{ass_time(we)},{style},,0,0,0,,"
+                f"{{\\blur{glow_blur}\\bord0\\shad0\\1c{glow_col}\\alpha{glow_alpha}}}{disp}")
+
+        # main layer - layer 1
+        if yt:
+            # red, semi-transparent, animated pop-out (bigger overshoot)
+            anim = "{\\alpha&H48&\\fscx60\\fscy60\\t(0,150,\\fscx118\\fscy118)\\t(150,260,\\fscx100\\fscy100)}"
+        elif is_hook:
             anim = "{\\fscx126\\fscy126\\t(0,190,\\fscx100\\fscy100)}"
         else:
             anim = "{\\fscx88\\fscy88\\t(0,110,\\fscx100\\fscy100)}"
@@ -96,7 +109,7 @@ with open("subs2.ass", "w", encoding="utf-8") as f:
     f.write(HEADER + "\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
     f.write("\n".join(events) + "\n")
 
-with open("clicks.json", "w") as f:
-    json.dump(click_times, f)
+with open("sfx.json", "w") as f:
+    json.dump(sfx, f)
 
-print(f"subs2.ass: {len(events)} events, red/click words at: {click_times}")
+print(f"subs2.ass: {len(events)} events; hook SFX: {sfx}")
