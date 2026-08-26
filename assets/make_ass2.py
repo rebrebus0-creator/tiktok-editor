@@ -28,6 +28,10 @@ RED_WORDS = {"АМЕРИКАНСКИЙ", "YOUTUBE-КАНАЛ", "5", "МИНУТ"
 def norm(w):
     return re.sub(r"[^\w-]", "", w, flags=re.UNICODE).upper()
 
+def strip_punct(w):
+    # remove commas, periods, dashes, ellipsis, quotes, ! ? etc. keep letters/digits and inner hyphen
+    return re.sub(r"[.,!?…«»\"'—–-]", "", w).strip()
+
 def ass_time(t):
     h = int(t // 3600); t -= h*3600
     m = int(t // 60); t -= m*60
@@ -56,7 +60,10 @@ click_times = []
 
 for (start, end, text) in CUES:
     is_hook = start < HOOK_END
-    words = text.split()
+    if is_hook:
+        continue  # hook subtitles removed — user edits the first seconds himself
+    words = [strip_punct(x) for x in text.split()]
+    words = [x for x in words if x]
     weights = [max(len(w), 2) for w in words]
     total = sum(weights)
     dur = end - start
