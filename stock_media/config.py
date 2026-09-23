@@ -14,6 +14,20 @@ DOTENV_PATH: str = find_dotenv(usecwd=True)
 load_dotenv(DOTENV_PATH, override=False)
 
 
+def _env_str(name: str) -> str | None:
+    """Значение переменной, где пустая строка и пробелы равны отсутствию.
+
+    Типичный случай: в .env осталась строка `PEXELS_API_KEY=` без значения.
+    Без этой нормализации ключ считался бы заданным, и вместо понятного
+    «ключ не задан» пользователь ловил бы 401 от сервиса.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    return stripped or None
+
+
 def _env_flag(name: str, default: bool = False) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -22,9 +36,9 @@ def _env_flag(name: str, default: bool = False) -> bool:
 
 
 class Settings(BaseModel):
-    pexels_api_key: str | None = Field(default_factory=lambda: os.getenv("PEXELS_API_KEY"))
-    pixabay_api_key: str | None = Field(default_factory=lambda: os.getenv("PIXABAY_API_KEY"))
-    anthropic_api_key: str | None = Field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY"))
+    pexels_api_key: str | None = Field(default_factory=lambda: _env_str("PEXELS_API_KEY"))
+    pixabay_api_key: str | None = Field(default_factory=lambda: _env_str("PIXABAY_API_KEY"))
+    anthropic_api_key: str | None = Field(default_factory=lambda: _env_str("ANTHROPIC_API_KEY"))
 
     cache_dir: Path = Field(
         default_factory=lambda: Path(os.getenv("STOCK_MEDIA_CACHE_DIR", "./media_cache"))

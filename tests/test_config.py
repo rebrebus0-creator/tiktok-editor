@@ -34,3 +34,22 @@ def test_env_flag_parsing(monkeypatch):
     for raw, expected in [("1", True), ("true", True), ("ON", True), ("0", False), ("нет", False)]:
         monkeypatch.setenv("STOCK_MEDIA_ENABLE_YOUTUBE", raw)
         assert Settings().enable_youtube is expected
+
+
+def test_blank_key_counts_as_unset(monkeypatch):
+    """Строка `PEXELS_API_KEY=` в .env не должна выглядеть как заданный ключ."""
+    monkeypatch.setenv("PEXELS_API_KEY", "")
+    settings = Settings()
+    assert settings.pexels_api_key is None
+    assert "pexels" not in settings.enabled_providers()
+    assert settings.provider_status()["pexels"] == "не задан PEXELS_API_KEY"
+
+
+def test_whitespace_key_counts_as_unset(monkeypatch):
+    monkeypatch.setenv("PIXABAY_API_KEY", "   ")
+    assert Settings().pixabay_api_key is None
+
+
+def test_key_is_trimmed(monkeypatch):
+    monkeypatch.setenv("PEXELS_API_KEY", "  abc  ")
+    assert Settings().pexels_api_key == "abc"
