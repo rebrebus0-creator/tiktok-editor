@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stock-media"
+version = "0.1.0"
+description = "Поиск и загрузка стоковых видео/фото под текстовый запрос"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "pydantic>=2.6",
+]
+
+[project.optional-dependencies]
+llm = ["anthropic>=1.0"]
+youtube = ["yt-dlp>=2024.1.1"]
+dev = ["pytest>=8.0", "responses>=0.25"]
+
+[project.scripts]
+stock-media = "stock_media.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["stock_media*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
