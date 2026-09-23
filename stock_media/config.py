@@ -5,7 +5,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+
+#: Подхватываем .env из текущей директории или любой родительской.
+#: Уже заданные переменные окружения имеют приоритет и не затираются.
+load_dotenv(override=False)
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
