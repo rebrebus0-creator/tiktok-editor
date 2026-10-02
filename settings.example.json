@@ -1,8 +1,9 @@
 {
   "mode": "mixed",
-  "imageProvider": "pexels",
+  "imageProvider": "fastgen",
   "stockVideo": true,
   "pexelsApiKey": "",
+  "fastgen": {"apiKey": "", "baseUrl": "https://api.fast-gen.ai", "operation": "gemini_nano_banana_2_image_generate"},
   "fal": {"apiKey": "", "model": "fal-ai/flux/schnell"},
   "whisper": {"model": "small", "device": "cpu", "computeType": "int8"},
   "plannerModel": "claude-opus-5-5",

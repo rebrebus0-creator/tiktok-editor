@@ -44,14 +44,46 @@ const falImage = async (prompt: string, s: Settings): Promise<Found | null> => {
   const r = await fetch(`https://fal.run/${s.fal.model}`, {
     method: 'POST',
     headers: {Authorization: `Key ${s.fal.apiKey}`, 'Content-Type': 'application/json'},
-    body: JSON.stringify({prompt: `${prompt}. ${s.styleHint}`, image_size: 'landscape_16_9', num_images: 1}),
+    body: JSON.stringify({prompt: `${prompt}. ${s.photoStyle}`, image_size: 'landscape_16_9', num_images: 1}),
   });
   if (!r.ok) throw new Error(`fal ${r.status}: ${await r.text()}`);
   const j = (await r.json()) as {images: {url: string}[]};
   return j.images[0] ? {url: j.images[0].url, kind: 'image', credit: s.fal.model} : null;
 };
 
+/** fast-gen.ai v6 API: async job -> poll -> download_url (or inline data URI). */
+const fastgenImage = async (prompt: string, s: Settings): Promise<Found | null> => {
+  const fg = s.fastgen;
+  if (!fg?.apiKey) throw new Error('fastgen api key missing (settings.fastgen.apiKey or FASTGEN_API_KEY)');
+  const headers = {'X-API-Key': fg.apiKey, 'Content-Type': 'application/json'};
+  const r = await fetch(`${fg.baseUrl}/api/v6/generations`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({operation: fg.operation, prompt: `${prompt}. ${s.photoStyle}`, aspect_ratio: '16:9'}),
+  });
+  if (!r.ok) throw new Error(`fastgen ${r.status}: ${await r.text()}`);
+  const {id} = (await r.json()) as {id: string};
+  const deadline = Date.now() + 6 * 60_000;
+  while (Date.now() < deadline) {
+    await new Promise((res) => setTimeout(res, 3000));
+    const st = await fetch(`${fg.baseUrl}/api/v6/generations/${id}`, {headers});
+    if (!st.ok) continue;
+    const j = (await st.json()) as {status: string; error?: string; results?: {download_url?: string; data?: string}[]};
+    if (j.status === 'failed') throw new Error(`fastgen failed: ${j.error}`);
+    if (j.status === 'succeeded') {
+      const res = j.results?.[0];
+      const url = res?.download_url ?? res?.data;
+      return url ? {url, kind: 'image', credit: fg.operation} : null;
+    }
+  }
+  throw new Error(`fastgen timeout for ${id}`);
+};
+
 const download = async (url: string, file: string) => {
+  if (url.startsWith('data:')) {
+    fs.writeFileSync(file, Buffer.from(url.slice(url.indexOf(',') + 1), 'base64'));
+    return;
+  }
   const r = await fetch(url);
   if (!r.ok) throw new Error(`download ${r.status} ${url}`);
   fs.writeFileSync(file, Buffer.from(await r.arrayBuffer()));
@@ -72,7 +104,9 @@ const resolveOne = async (a: Asset, id: string, job: string, s: Settings): Promi
   }
   let found: Found | null = null;
   try {
-    if (provider === 'gen' || provider === 'fal') {
+    if (provider === 'fastgen' || (provider === 'gen' && s.imageProvider === 'fastgen')) {
+      found = await fastgenImage(a.prompt ?? q, s);
+    } else if (provider === 'gen' || provider === 'fal') {
       found = await falImage(a.prompt ?? q, s);
     } else {
       if (!s.pexelsApiKey) throw new Error('pexels api key missing (settings.pexelsApiKey or PEXELS_API_KEY)');
@@ -121,7 +155,7 @@ export const fetchAssets = async (plan: Plan, job: string, s: Settings, fresh = 
   const worker = async () => {
     for (let next = queue.shift(); next; next = queue.shift()) await resolveOne(next[0], next[1], job, s);
   };
-  await Promise.all(Array.from({length: 4}, worker));
+  await Promise.all(Array.from({length: 3}, worker));
   const missing = all.filter(([a]) => !a.src).length;
   console.log(`assets: ${all.length - missing}/${all.length} resolved${missing ? `, ${missing} placeholders` : ''}`);
 };

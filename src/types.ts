@@ -12,7 +12,7 @@ export type Asset = {
   /** Prompt for the image/video generator. */
   prompt?: string;
   /** Which provider should resolve this asset. Default: settings.defaultProvider. */
-  provider?: 'pexels' | 'gen' | 'file' | 'placeholder';
+  provider?: 'fastgen' | 'pexels' | 'fal' | 'gen' | 'file' | 'placeholder';
   credit?: string;
 };
 
