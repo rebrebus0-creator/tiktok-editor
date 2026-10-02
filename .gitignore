@@ -1,0 +1,11 @@
+node_modules/
+out/
+input/
+work/
+public/input/
+public/assets/*
+!public/assets/.gitkeep
+settings.json
+.env
+*.log
+__pycache__/

@@ -1,0 +1,20 @@
+{
+  "video": "input/demo-avatar.mp4",
+  "duration": 48,
+  "fps": 24,
+  "width": 1920,
+  "height": 1080,
+  "film": true,
+  "sfx": true,
+  "scenes": [
+    {"id": "s01", "type": "label", "start": 0.5, "end": 4, "text": "Перевал Дятлова", "sub": "Северный Урал · 1959"},
+    {"id": "s02", "type": "photo", "start": 4.5, "end": 9, "asset": {"query": "snowy mountain pass at night"}, "grade": "cold", "caption": "Гора Холатчахль · высота 1079 м", "circle": {"x": 0.55, "y": 0.55, "r": 0.08}},
+    {"id": "s03", "type": "split", "start": 9.5, "end": 15, "avatar": "left", "asset": {"query": "hikers walking in snowy forest"}, "grade": "bw", "caption": "Группа Дятлова"},
+    {"id": "s04", "type": "numbers", "start": 15.5, "end": 20, "items": [{"value": 67, "label": "лет тайне"}, {"value": 75, "label": "версий"}, {"value": 0, "label": "ответов"}], "bg": {"query": "snowy mountain peak"}, "grade": "cold"},
+    {"id": "s05", "type": "note", "start": 20.5, "end": 27, "lines": ["Причиной [[гибели]] следует считать", "стихийную [[силу]], преодолеть", "которую люди не были в состоянии."], "stamp": "Дело закрыто", "bg": {"query": "old desk with case files"}, "grade": "sepia"},
+    {"id": "s06", "type": "checklist", "start": 27.5, "end": 32, "items": ["Без обуви", "Без верхней одежды", "1500 м от палатки"], "bg": {"query": "campfire in winter forest"}, "grade": "bw"},
+    {"id": "s07", "type": "polaroids", "start": 32.5, "end": 37.5, "items": [{"asset": {"query": "footprints in snow"}, "caption": "Следы"}, {"asset": {"query": "big cedar tree"}, "caption": "Кедр"}, {"asset": {"query": "snow ravine"}, "caption": "Овраг"}], "label": "2 месяца поисков", "grade": "cold"},
+    {"id": "s08", "type": "stamp", "start": 38, "end": 41, "text": "Радиация", "bg": {"query": "old laboratory geiger counter"}, "grade": "bw"},
+    {"id": "s09", "type": "board", "start": 41.5, "end": 48, "items": [{"asset": {"query": "group"}, "caption": "Группа"}, {"asset": {"query": "footprints"}, "caption": "Следы"}, {"asset": {"query": "lab"}, "caption": "Радиация"}, {"asset": {"query": "case file"}, "caption": "Дело"}], "label": "Тайна не раскрыта"}
+  ]
+}

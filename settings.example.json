@@ -1,0 +1,12 @@
+{
+  "mode": "mixed",
+  "imageProvider": "pexels",
+  "stockVideo": true,
+  "pexelsApiKey": "",
+  "fal": {"apiKey": "", "model": "fal-ai/flux/schnell"},
+  "whisper": {"model": "small", "device": "cpu", "computeType": "int8"},
+  "plannerModel": "claude-opus-5-5",
+  "render": {"concurrency": 4, "crf": 20},
+  "film": true,
+  "sfx": true
+}
