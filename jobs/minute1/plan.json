@@ -1,0 +1,36 @@
+{
+ "video": "input/minute1.mp4",
+ "duration": 60,
+ "fps": 24,
+ "width": 1280,
+ "height": 720,
+ "film": true,
+ "sfx": true,
+ "scenes": [
+  {"id": "s01", "type": "numbers", "start": 1.6, "end": 6.9,
+   "items": [{"value": 3, "suffix": " €", "label": "pro Ananas"}, {"value": 1, "suffix": " €", "label": "landet im Müll"}],
+   "bg": {"prompt": "A whole ripe pineapple on a market stall with a small handwritten price tag, warm morning light, shallow depth of field, documentary photo"}, "grade": "sepia"},
+  {"id": "s02", "type": "photo", "start": 7.2, "end": 11.6, "caption": "Zu dick geschält",
+   "asset": {"prompt": "Thick strips of pineapple peel with lots of yellow fruit flesh still attached lying in a kitchen trash bin, close-up, realistic photo"}},
+  {"id": "s03", "type": "split", "start": 11.9, "end": 17.6, "avatar": "left", "caption": "Klebrige Hände",
+   "asset": {"prompt": "Close-up of sticky hands digging brown eyes out of a peeled pineapple with the tip of a small knife, juice on a wooden board, realistic photo"}},
+  {"id": "s04", "type": "photo", "start": 20.2, "end": 25.8, "caption": "Augen in Spiralen", "circle": {"x": 0.5, "y": 0.5, "r": 0.11},
+   "asset": {"prompt": "Macro photo of pineapple skin showing the diagonal spiral rows of brown eyes, dramatic side light, high detail"}},
+  {"id": "s05", "type": "split", "start": 26.1, "end": 32.8, "avatar": "right", "caption": "Japanische Technik",
+   "asset": {"prompt": "Japanese chef's hands carving neat diagonal V-shaped grooves along a pineapple to remove the eyes in spirals, Japanese knife, clean kitchen, realistic photo"}},
+  {"id": "s06", "type": "polaroids", "start": 33.0, "end": 37.9, "label": "Obst nach dem Essen",
+   "items": [
+     {"caption": "Osaka", "asset": {"prompt": "Osaka Dotonbori street at dusk with neon signs and canal, 1990s film photo look"}},
+     {"caption": "Zeremonie", "asset": {"prompt": "A Japanese family table after dinner with neatly sliced fruit served on a ceramic plate, warm home light, nostalgic film photo"}},
+     {"caption": "Kindheit", "asset": {"prompt": "A Japanese boy watching his grandmother carefully cut fruit at a small kitchen table, nostalgic 1990s film photo"}}
+   ]},
+  {"id": "s07", "type": "label", "start": 38.1, "end": 42.7, "text": "Hiroshi", "sub": "Koch aus Osaka"},
+  {"id": "s08", "type": "note", "start": 43.0, "end": 47.8, "title": "Der Trick",
+   "lines": ["Macht die Ananas süßer", "mit etwas, das in jeder", "[[deutschen Küche]] steht"], "stamp": "Geheim",
+   "bg": {"prompt": "Typical German home kitchen counter with salt, sugar and spice jars, soft daylight, realistic photo"}, "grade": "sepia"},
+  {"id": "s09", "type": "photo", "start": 49.2, "end": 53.6, "caption": "Erst genau hinschauen",
+   "asset": {"prompt": "A whole pineapple standing on a dark wooden cutting board next to a Japanese knife, moody studio light, realistic photo"}},
+  {"id": "s10", "type": "photo", "start": 54.0, "end": 59.6, "caption": "Felder mit Punkt", "circle": {"x": 0.5, "y": 0.48, "r": 0.09}, "stamp": "?",
+   "asset": {"prompt": "Extreme macro of a single hexagonal field on pineapple skin with a small brown dot in the center, sharp detail, studio light"}}
+ ]
+}
